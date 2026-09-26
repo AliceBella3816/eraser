@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#111111">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="manifest" href="manifest.json">
+<title>手动修复笔</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #111; color: #eee; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  header { padding: 10px 14px; background: #1c1c1e; font-size: 14px;
+    display: flex; align-items: center; justify-content: space-between; }
+  header .title { font-weight: 600; }
+  header .hint { font-size: 11px; color: #8a8a8e; }
+  #stage { position: relative; flex: 1; overflow: hidden; background: #000; touch-action: none; }
+  canvas { display: block; position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+  #placeholder { position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; color: #666; font-size: 14px; gap: 10px;
+    text-align: center; padding: 20px; }
+  #placeholder .big { font-size: 40px; }
+  #toolbar { background: #1c1c1e; padding: 8px 6px calc(8px + env(safe-area-inset-bottom));
+    display: flex; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tool { flex: 0 0 auto; min-width: 58px; padding: 8px 4px; border: none; border-radius: 10px;
+    background: #2c2c2e; color: #eee; font-size: 12px; display: flex; flex-direction: column;
+    align-items: center; gap: 3px; }
+  .tool.active { background: #0a84ff; color: #fff; }
+  .tool .ic { font-size: 18px; line-height: 1; }
+  .tool:disabled { opacity: .4; }
+  #brushPanel { position: absolute; left: 10px; right: 10px; bottom: 70px; background: #2c2c2e;
+    border-radius: 12px; padding: 12px 14px; display: none; }
+  #brushPanel.show { display: block; }
+  #brushPanel label { font-size: 12px; color: #aaa; }
+  #brushPanel input[type=range] { width: 100%; }
+  #busy { position: absolute; inset: 0; background: rgba(0,0,0,.6); display: none;
+    align-items: center; justify-content: center; flex-direction: column; gap: 12px;
+    color: #fff; z-index: 20; }
+  #busy.show { display: flex; }
+  .spinner { width: 34px; height: 34px; border: 3px solid #555; border-top-color: #0a84ff;
+    border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #saveOverlay { position: absolute; inset: 0; background: rgba(0,0,0,.92); display: none;
+    flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    z-index: 30; padding: 20px; }
+  #saveOverlay.show { display: flex; }
+  #saveOverlay img { max-width: 100%; max-height: 70%; border-radius: 8px; }
+  #saveOverlay .tip { font-size: 13px; color: #ccc; text-align: center; }
+  .btn { padding: 10px 18px; border: none; border-radius: 10px; font-size: 14px; }
+  .btn-ghost { background: #3a3a3c; color: #eee; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span class="title">手动修复笔</span>
+    <span class="hint">照片仅本地处理，不上传</span>
+  </header>
+
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="placeholder">
+      <div class="big">🖌️</div>
+      <div>点下方「上传」开始（从相册或文件选图）<br>双指捏合放大，涂抹后自动修复</div>
+    </div>
+    <div id="busy"><div class="spinner"></div><div>修复中…</div></div>
+    <div id="saveOverlay">
+      <img id="saveImg" alt="结果">
+      <div class="tip">已按原图尺寸与清晰度生成（仅擦除区被处理，其余像素完全不变）。iOS/安卓请点系统分享的「存储到照片」真正存入相册；若未弹出分享，可长按上方图片选择「存储」，或点下方返回。</div>
+      <button class="btn btn-ghost" id="closeSave">返回继续编辑</button>
+    </div>
+  </div>
+
+  <div id="brushPanel">
+    <label>笔刷大小：<span id="brushVal">18</span> px</label>
+    <input type="range" id="brushRange" min="2" max="200" value="18">
+    <label style="margin-top:8px;display:block">边缘柔化：<span id="featherVal">2</span> px</label>
+    <input type="range" id="featherRange" min="0" max="8" value="2">
+  </div>
+
+  <div id="toolbar">
+    <button class="tool" id="btnUpload"><span class="ic">⬆️</span>上传</button>
+    <button class="tool" id="btnBrush"><span class="ic">🖌️</span>画笔</button>
+    <button class="tool active" id="btnPaint"><span class="ic">✏️</span>涂抹</button>
+    <button class="tool" id="btnErase"><span class="ic">🩹</span>橡皮</button>
+    <button class="tool active" id="btnAuto"><span class="ic">⚡</span>自动</button>
+    <button class="tool active" id="btnStruct"><span class="ic">🛡️</span>结构</button>
+    <button class="tool" id="btnSource"><span class="ic">📍</span>选样本</button>
+    <button class="tool" id="btnMove"><span class="ic">✋</span>移动</button>
+    <button class="tool" id="btnFill"><span class="ic">✨</span>修复消除</button>
+    <button class="tool" id="btnClone"><span class="ic">🧬</span>修复画笔</button>
+    <button class="tool" id="btnUndo"><span class="ic">↩️</span>撤销</button>
+    <button class="tool" id="btnRedo"><span class="ic">↪️</span>重做</button>
+    <button class="tool" id="btnCompare"><span class="ic">👁️</span>对比</button>
+    <button class="tool" id="btnSave"><span class="ic">💾</span>保存</button>
+    <button class="tool" id="btnReset"><span class="ic">🔄</span>还原原图</button>
+  </div>
+
+  <input type="file" id="fileInput" accept="image/*" style="display:none">
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const stage = document.getElementById("stage");
+  const placeholder = document.getElementById("placeholder");
+  const busy = document.getElementById("busy");
+  const saveOverlay = document.getElementById("saveOverlay");
+  const saveImg = document.getElementById("saveImg");
+  const fileInput = document.getElementById("fileInput");
+  const brushPanel = document.getElementById("brushPanel");
+  const brushRange = document.getElementById("brushRange");
+  const brushVal = document.getElementById("brushVal");
+  const featherRange = document.getElementById("featherRange");
+  const featherVal = document.getElementById("featherVal");
+
+  let img = null, imgW = 0, imgH = 0;
+  let resultCanvas = null, resultCtx = null;
+  let maskCanvas = null, maskCtx = null;
+  let baseScale = 1, view = { scale: 1, tx: 0, ty: 0 };
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let tool = "paint";
+  let brushSize = 18;
+  let sourcePoint = null;
+  let cursorPt = null;
+  let originalCanvas = null, originalCtx = null;
+  let compareMode = false;
+  let feather = 2;
+  let autoFill = true;
+  let structProtect = true;
+  const undoStack = [], redoStack = [];
+  const MAX_UNDO = 12;
+
+  const pointers = new Map();
+  let drawing = false, lastPt = null, mode = null;
+  let pinchStartDist = 0, pinchStartScale = 1;
+
+  document.getElementById("btnUpload").onclick = () => fileInput.click();
+  fileInput.onchange = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    const im = new Image();
+    im.onload = () => { img = im; setupImage(); URL.revokeObjectURL(url); };
+    im.src = url;
+  };
+
+  function setupImage() {
+    placeholder.style.display = "none";
+    // 尽量保留原图尺寸与清晰度：仅当超出浏览器 canvas 上限时才等比缩放（绝大多数手机照片会保持原尺寸）
+    const MAX_EDGE = 4096, MAX_PIX = 16777216;
+    let w = img.naturalWidth, h = img.naturalHeight;
+    let s = 1;
+    if (Math.max(w, h) > MAX_EDGE) s = Math.min(s, MAX_EDGE / Math.max(w, h));
+    if (w * h > MAX_PIX) s = Math.min(s, Math.sqrt(MAX_PIX / (w * h)));
+    if (s < 1) { w = Math.round(w * s); h = Math.round(h * s); }
+    imgW = w; imgH = h;
+    resultCanvas = document.createElement("canvas");
+    resultCanvas.width = w; resultCanvas.height = h;
+    resultCtx = resultCanvas.getContext("2d");
+    resultCtx.drawImage(img, 0, 0, w, h);
+    originalCanvas = document.createElement("canvas");
+    originalCanvas.width = w; originalCanvas.height = h;
+    originalCtx = originalCanvas.getContext("2d");
+    originalCtx.drawImage(img, 0, 0, w, h);
+    maskCanvas = document.createElement("canvas");
+    maskCanvas.width = w; maskCanvas.height = h;
+    maskCtx = maskCanvas.getContext("2d");
+    maskCtx.clearRect(0, 0, w, h);
+    undoStack.length = 0; redoStack.length = 0; sourcePoint = null;
+    resizeStage(); fitView(); render();
+  }
+
+  function resizeStage() {
+    const r = stage.getBoundingClientRect();
+    cv.style.width = r.width + "px"; cv.style.height = r.height + "px";
+    cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+  }
+  window.addEventListener("resize", () => { if (img) { resizeStage(); fitView(); render(); } });
+
+  function fitView() {
+    const r = stage.getBoundingClientRect();
+    const s = Math.min(r.width / imgW, r.height / imgH) * 0.96;
+    baseScale = s; view.scale = s;
+    view.tx = (r.width - imgW * s) / 2; view.ty = (r.height - imgH * s) / 2;
+  }
+
+  function render() {
+    const r = stage.getBoundingClientRect();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    if (!img) return;
+    ctx.setTransform(view.scale * dpr, 0, 0, view.scale * dpr, view.tx * dpr, view.ty * dpr);
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(compareMode ? originalCanvas : resultCanvas, 0, 0);
+    if (!compareMode) {
+      ctx.drawImage(maskCanvas, 0, 0);
+      if (sourcePoint) {
+        ctx.fillStyle = "#00ff88";
+        ctx.beginPath(); ctx.arc(sourcePoint.x, sourcePoint.y, Math.max(5, brushSize * 0.28), 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+      }
+      if (cursorPt && (tool === "paint" || tool === "erase")) {
+        ctx.strokeStyle = "rgba(255,255,255,0.85)";
+        ctx.lineWidth = 2 / view.scale;
+        ctx.beginPath(); ctx.arc(cursorPt.x, cursorPt.y, brushSize / 2, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+  }
+
+  function screenToImg(clientX, clientY) {
+    const r = cv.getBoundingClientRect();
+    return { x: (clientX - r.left - view.tx) / view.scale, y: (clientY - r.top - view.ty) / view.scale };
+  }
+
+  cv.addEventListener("pointerdown", onDown);
+  cv.addEventListener("pointermove", onMove);
+  cv.addEventListener("pointerup", onUp);
+  cv.addEventListener("pointercancel", onUp);
+
+  function onDown(e) {
+    cv.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) { startPinch(); return; }
+    if (pointers.size > 2) return;
+    const p = screenToImg(e.clientX, e.clientY);
+    if (tool === "move") { mode = "pan"; lastPt = { x: e.clientX, y: e.clientY }; return; }
+    if (tool === "source") { sourcePoint = p; render(); return; }
+    mode = tool; drawing = true; lastPt = p;
+    if (tool === "paint" || tool === "erase") { cursorPt = p; brushPanel.classList.remove("show"); }
+    if (tool === "erase") pushUndo();   // 橡皮直接改写画面，入栈以便撤销
+    drawStroke(p, p);
+  }
+  function onMove(e) {
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) { doPinch(); return; }
+    if (mode === "pan") {
+      view.tx += e.clientX - lastPt.x; view.ty += e.clientY - lastPt.y;
+      lastPt = { x: e.clientX, y: e.clientY }; render(); return;
+    }
+    if (!drawing) return;
+    const p = screenToImg(e.clientX, e.clientY);
+    if (tool === "paint" || tool === "erase") cursorPt = p;
+    drawStroke(lastPt, p); lastPt = p;
+  }
+  function onUp(e) {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinchStartDist = 0;
+    if (drawing) {
+      drawing = false; mode = null; lastPt = null; cursorPt = null;
+      // 实时修复：松开手后自动处理当前涂抹（仅"涂抹"触发；橡皮直接还原原图，无需自动填充）
+      if (autoFill && tool === "paint") { setTimeout(doAutoFill, 30); }
+    } else if (mode === "pan") { mode = null; }
+  }
+
+  function doAutoFill() {
+    const cnt = getMaskCount();
+    if (cnt > 250000) { toast("区域过大，请分几次小范围擦除"); return; }
+    pushUndo();
+    runBusy(() => { doContentAwareFill(); clearMask(); render(); toast("已自动修复 ✓"); });
+  }
+
+  function drawStroke(a, b) {
+    if (mode === "erase") { eraseStroke(a, b); render(); return; }
+    maskCtx.save();
+    if (feather > 0 && "filter" in maskCtx) maskCtx.filter = "blur(" + feather + "px)";
+    maskCtx.lineCap = "round"; maskCtx.lineJoin = "round"; maskCtx.lineWidth = brushSize;
+    maskCtx.globalCompositeOperation = "source-over";
+    maskCtx.fillStyle = "rgba(255,40,40,0.55)"; maskCtx.strokeStyle = "rgba(255,40,40,0.55)";
+    maskCtx.beginPath(); maskCtx.moveTo(a.x, a.y); maskCtx.lineTo(b.x, b.y); maskCtx.stroke();
+    if (a.x === b.x && a.y === b.y) {
+      maskCtx.beginPath(); maskCtx.arc(a.x, a.y, brushSize / 2, 0, Math.PI * 2); maskCtx.fill();
+    }
+    maskCtx.restore(); render();
+  }
+
+  // 橡皮：把笔刷覆盖区还原为原图像素（修错或想保留原样时擦回原图），并清掉该处的红色涂抹标记
+  function eraseStroke(a, b) {
+    const r = brushSize / 2;
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    const steps = Math.max(1, Math.ceil(dist / Math.max(1, r * 0.5)));
+    // 1) 清掉红色涂抹标记
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = "destination-out";
+    maskCtx.fillStyle = "rgba(0,0,0,1)";
+    if (feather > 0 && "filter" in maskCtx) maskCtx.filter = "blur(" + feather + "px)";
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps, x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t;
+      maskCtx.beginPath(); maskCtx.arc(x, y, r, 0, Math.PI * 2); maskCtx.fill();
+    }
+    maskCtx.restore();
+    // 2) 还原原图像素（只在笔刷圆内取回，非擦除区完全不动）
+    resultCtx.save();
+    if (feather > 0 && "filter" in resultCtx) resultCtx.filter = "blur(" + feather + "px)";
+    for (let s = 0; s <= steps; s++) {
+      const t = s / steps, x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t;
+      const x0 = Math.max(0, Math.floor(x - r)), y0 = Math.max(0, Math.floor(y - r));
+      const x1 = Math.min(imgW, Math.ceil(x + r)), y1 = Math.min(imgH, Math.ceil(y + r));
+      const w = x1 - x0, h = y1 - y0;
+      if (w <= 0 || h <= 0) continue;
+      resultCtx.save();
+      resultCtx.beginPath(); resultCtx.arc(x, y, r, 0, Math.PI * 2); resultCtx.clip();
+      resultCtx.drawImage(originalCanvas, x0, y0, w, h, x0, y0, w, h);
+      resultCtx.restore();
+    }
+    resultCtx.restore();
+  }
+
+  function twoPointers() { const p = [...pointers.values()]; return { a: p[0], b: p[1] }; }
+  function startPinch() {
+    const { a, b } = twoPointers();
+    pinchStartDist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    pinchStartScale = view.scale;
+  }
+  function doPinch() {
+    const { a, b } = twoPointers();
+    const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    const newScale = clamp(pinchStartScale * (dist / pinchStartDist), baseScale * 0.5, baseScale * 10);
+    const r0 = stage.getBoundingClientRect();
+    const mx = (a.x + b.x) / 2 - r0.left, my = (a.y + b.y) / 2 - r0.top;
+    const imgX = (mx - view.tx) / view.scale, imgY = (my - view.ty) / view.scale;
+    view.scale = newScale; view.tx = mx - imgX * newScale; view.ty = my - imgY * newScale;
+    render();
+  }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  function snapshot() {
+    return { img: resultCtx.getImageData(0, 0, imgW, imgH), mask: maskCtx.getImageData(0, 0, imgW, imgH),
+             src: sourcePoint ? { ...sourcePoint } : null };
+  }
+  function pushUndo() { undoStack.push(snapshot()); if (undoStack.length > MAX_UNDO) undoStack.shift(); redoStack.length = 0; }
+  function restore(s) { resultCtx.putImageData(s.img, 0, 0); maskCtx.putImageData(s.mask, 0, 0); sourcePoint = s.src ? { ...s.src } : null; }
+  document.getElementById("btnUndo").onclick = () => { if (!undoStack.length) return; redoStack.push(snapshot()); restore(undoStack.pop()); render(); };
+  document.getElementById("btnRedo").onclick = () => {
+    if (!redoStack.length) { toast("没有可重做的步骤，先点一次「撤销」才能重做"); return; }
+    undoStack.push(snapshot()); restore(redoStack.pop()); render();
+  };
+
+  function getMaskCount() {
+    const d = maskCtx.getImageData(0, 0, imgW, imgH).data; let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 20) n++;
+    return n;
+  }
+  function clearMask() { maskCtx.clearRect(0, 0, imgW, imgH); }
+
+  /* ---------- 结构感知的内容识别填充（v9） ----------
+     在原有 patch 匹配基础上加入：
+     1) 梯度/边缘分析：识别洞口周围是否存在直线、弧线、物体边缘；
+     2) 结构连续性惩罚：优先选择边缘方向一致的源 patch，避免把竖线补成弯的；
+     3) 各向异性距离：沿边缘方向搜索更便宜，跨边缘搜索更贵，保证"在同一条褶线上找纹理"。
+  */
+  document.getElementById("btnFill").onclick = () => {
+    if (!img) return;
+    const cnt = getMaskCount();
+    if (cnt === 0) { toast("请先用「涂抹」标出要消除的区域"); return; }
+    if (cnt > 90000) { toast("区域过大，请分几次小范围擦除"); return; }
+    pushUndo();
+    runBusy(() => { doContentAwareFill(); clearMask(); render(); });
+  };
+
+  function computeStructure(data, W, H) {
+    const n = W * H;
+    const gx = new Float32Array(n), gy = new Float32Array(n), strength = new Float32Array(n);
+    for (let y = 1; y < H - 1; y++) {
+      for (let x = 1; x < W - 1; x++) {
+        const i = y * W + x, p = i * 4;
+        const lumL = 0.299 * data[p - 4] + 0.587 * data[p - 3] + 0.114 * data[p - 2];
+        const lumR = 0.299 * data[p + 4] + 0.587 * data[p + 5] + 0.114 * data[p + 6];
+        const lumU = 0.299 * data[p - W * 4] + 0.587 * data[p - W * 4 + 1] + 0.114 * data[p - W * 4 + 2];
+        const lumD = 0.299 * data[p + W * 4] + 0.587 * data[p + W * 4 + 1] + 0.114 * data[p + W * 4 + 2];
+        gx[i] = (lumR - lumL) * 0.5;
+        gy[i] = (lumD - lumU) * 0.5;
+        strength[i] = Math.hypot(gx[i], gy[i]);
+      }
+    }
+    return { gx, gy, strength };
+  }
+
+  function contentAwareFillOn(rctx, mctx, W, H) {
+    const src = rctx.getImageData(0, 0, W, H);
+    const data = src.data;
+    const before = rctx.getImageData(0, 0, W, H);
+    const maskData = mctx.getImageData(0, 0, W, H).data;
+    const { gx, gy, strength } = structProtect ? computeStructure(before.data, W, H) : { gx: null, gy: null, strength: null };
+
+    const hole = new Uint8Array(W * H);
+    const known = new Uint8Array(W * H);
+    const conf = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) {
+      if (maskData[i * 4 + 3] > 20) { hole[i] = 1; known[i] = 0; conf[i] = 0; }
+      else { known[i] = 1; conf[i] = 1; }
+    }
+    const half = 2;          // 5x5 patch
+    const searchR = 24;      // 略增大搜索范围，让结构匹配有更多候选
+    const distPenaltyBase = 0.42; // 基础距离惩罚
+    const structWeight = 0.18;    // 结构项权重
+    const edgeThr = 6;            // 梯度幅值阈值，低于此认为没有明显边缘
+    const maxRounds = 260;
+
+    for (let round = 0; round < maxRounds; round++) {
+      const boundary = [];
+      for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+        const i = y * W + x;
+        if (!hole[i]) continue;
+        let hasK = false, cmax = 0;
+        let sx = 0, sy = 0, sm = 0, sn = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const ni = (y + dy) * W + (x + dx);
+          if (known[ni]) {
+            hasK = true;
+            cmax = Math.max(cmax, conf[ni]);
+            if (structProtect && strength) {
+              const mg = strength[ni];
+              if (mg > edgeThr) { sx += -gy[ni]; sy += gx[ni]; sm += mg; sn++; }
+            }
+          }
+        }
+        // 边缘方向：梯度垂直方向（直线方向），用已知邻域平均
+        const emag = Math.hypot(sx, sy) + 1e-6;
+        const ex = sm > 0 ? sx / emag : 0, ey = sm > 0 ? sy / emag : 0;
+        const str = sn > 0 ? sm / sn : 0;
+        if (hasK) boundary.push({ i, x, y, conf: cmax, ex, ey, str });
+      }
+      if (boundary.length === 0) break;
+      boundary.sort((a, b) => b.conf - a.conf);
+
+      const fills = [];
+      for (const p of boundary) {
+        const { x, y, conf: pconf, ex, ey, str } = p;
+        let bestScore = Infinity, bestCx = x, bestCy = y;
+        for (let dy = -searchR; dy <= searchR; dy++) for (let dx = -searchR; dx <= searchR; dx++) {
+          const cx = x + dx, cy = y + dy;
+          if (cx < half || cy < half || cx >= W - half || cy >= H - half) continue;
+          let ok = true;
+          for (let py = -half; py <= half && ok; py++) {
+            const row = (cy + py) * W;
+            for (let px = -half; px <= half; px++) {
+              if (!known[row + cx + px]) { ok = false; break; }
+            }
+          }
+          if (!ok) continue;
+          let ssd = 0, structTerm = 0, cnt = 0, early = false;
+          for (let py = -half; py <= half; py++) {
+            const pyy = y + py; if (pyy < 0 || pyy >= H) continue;
+            const pRow = pyy * W;
+            const cRow = (cy + py) * W;
+            for (let px = -half; px <= half; px++) {
+              const pxx = x + px; if (pxx < 0 || pxx >= W) continue;
+              const pi = pRow + pxx;
+              if (!known[pi]) continue;
+              const ci = cRow + (cx + px);
+              const a = pi * 4, b = ci * 4;
+              const dr = data[a] - data[b], dg = data[a + 1] - data[b + 1], db = data[a + 2] - data[b + 2];
+              ssd += dr * dr + dg * dg + db * db; cnt++;
+
+              // 结构连续性：边缘梯度方向要一致（直线/弧线才会被延续）
+              if (structProtect && strength) {
+                const mg = strength[pi];
+                if (mg > edgeThr && strength[ci] > edgeThr) {
+                  const m1 = Math.hypot(gx[pi], gy[pi]);
+                  const m2 = Math.hypot(gx[ci], gy[ci]);
+                  const cosAng = (gx[pi] * gx[ci] + gy[pi] * gy[ci]) / (m1 * m2 + 1e-6);
+                  structTerm += (1 - Math.max(-1, Math.min(1, cosAng))) * mg;
+                }
+              }
+
+              if (ssd + structWeight * structTerm >= bestScore) { early = true; break; }
+            }
+            if (early) break;
+          }
+          if (cnt === 0) continue;
+          // 各向异性距离：有明显边缘时，沿边缘方向移动便宜（同一条褶线），跨边缘移动贵
+          const dist2 = dx * dx + dy * dy;
+          let effDist2 = dist2;
+          if (structProtect && str > edgeThr) {
+            const along = Math.abs(dx * ex + dy * ey);      // 沿边缘
+            const across = Math.abs(dx * (-ey) + dy * ex);  // 跨边缘
+            effDist2 = across * across * 1.7 + along * along * 0.45;
+          }
+          const score = ssd + structWeight * structTerm + cnt * distPenaltyBase * effDist2;
+          if (score < bestScore) { bestScore = score; bestCx = cx; bestCy = cy; }
+        }
+        fills.push({ x, y, cx: bestCx, cy: bestCy, conf: pconf });
+      }
+
+      for (const f of fills) {
+        const newConf = f.conf * 0.985;
+        for (let py = -half; py <= half; py++) for (let px = -half; px <= half; px++) {
+          const tx = f.x + px, ty = f.y + py;
+          if (tx < 0 || ty < 0 || tx >= W || ty >= H) continue;
+          const ti = ty * W + tx;
+          if (!hole[ti]) continue;
+          const si = (f.cy + py) * W + (f.cx + px);
+          const a = ti * 4, b = si * 4;
+          data[a] = data[b]; data[a + 1] = data[b + 1]; data[a + 2] = data[b + 2]; data[a + 3] = 255;
+          hole[ti] = 0; known[ti] = 1; conf[ti] = newConf;
+        }
+      }
+    }
+    // 羽化合成：边界用 mask 连续 alpha 平滑过渡，去除硬边接缝
+    const msk = mctx.getImageData(0, 0, W, H).data;
+    const b4 = before.data;
+    for (let i = 0, n = W * H; i < n; i++) {
+      const a = msk[i * 4 + 3] / 255;
+      if (a > 0 && a < 1) {
+        const p = i * 4;
+        data[p]   = b4[p]   * (1 - a) + data[p]   * a;
+        data[p+1] = b4[p+1] * (1 - a) + data[p+1] * a;
+        data[p+2] = b4[p+2] * (1 - a) + data[p+2] * a;
+        data[p+3] = 255;
+      }
+    }
+    rctx.putImageData(src, 0, 0);
+  }
+
+  /* 入口：大图先在降采样图上跑算法（保证流畅），再把擦除区按原图坐标回填，
+     非擦除区像素完全不动，导出保持原图尺寸与清晰度 */
+  /* 自然度增强（v7）：在填充结果上做两步后处理
+     1) 颜色/亮度自适应：把填充区整体色调向周围已知像素靠拢，消除"色差块"
+     2) 去块：填充区做轻度 3x3 模糊并轻微混合，磨掉方块感、保留细节 */
+  function postProcess() {
+    const W = imgW, H = imgH;
+    const img = resultCtx.getImageData(0, 0, W, H);
+    const data = img.data;
+    const m = maskCtx.getImageData(0, 0, W, H).data;
+    const fm = new Float32Array(W * H);
+    let minX = W, minY = H, maxX = 0, maxY = 0, any = false;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x, a = m[i * 4 + 3] / 255; fm[i] = a;
+      if (a > 0.1) { any = true; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+    }
+    if (!any) return;
+    minX = Math.max(0, minX - 2); minY = Math.max(0, minY - 2);
+    maxX = Math.min(W - 1, maxX + 2); maxY = Math.min(H - 1, maxY + 2);
+    const clamp = v => v < 0 ? 0 : v > 255 ? 255 : v;
+    // --- 1) 颜色/亮度自适应 ---
+    let fr = 0, fg = 0, fb = 0, fn = 0, kr = 0, kg = 0, kb = 0, kn = 0;
+    for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+      const i = y * W + x, a = fm[i], p = i * 4;
+      if (a > 0.5) { fr += data[p]; fg += data[p + 1]; fb += data[p + 2]; fn++; }
+      else if (a < 0.1) { kr += data[p]; kg += data[p + 1]; kb += data[p + 2]; kn++; }
+    }
+    if (fn > 0 && kn > 0) {
+      fr /= fn; fg /= fn; fb /= fn; kr /= kn; kg /= kn; kb /= kn;
+      const dr = (kr - fr) * 0.5, dg = (kg - fg) * 0.5, db = (kb - fb) * 0.5;
+      for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+        const i = y * W + x, a = fm[i]; if (a <= 0.1) continue;
+        const p = i * 4, w = a > 0.5 ? 1 : (a - 0.1) / 0.4;
+        data[p] = clamp(data[p] + dr * w);
+        data[p + 1] = clamp(data[p + 1] + dg * w);
+        data[p + 2] = clamp(data[p + 2] + db * w);
+      }
+    }
+    // --- 2) 去块：轻度盒式模糊 + 轻微混合 ---
+    const src = new Uint8ClampedArray(data);
+    const blend = 0.4;
+    for (let y = minY + 1; y < maxY; y++) for (let x = minX + 1; x < maxX; x++) {
+      const i = y * W + x, a = fm[i]; if (a <= 0.1) continue;
+      const p = i * 4; let r = 0, g = 0, b = 0, c = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const q = ((y + dy) * W + (x + dx)) * 4; r += src[q]; g += src[q + 1]; b += src[q + 2]; c++;
+      }
+      const w = a > 0.5 ? 1 : a / 0.5;
+      const br = r / c, bg = g / c, bb = b / c;
+      data[p] = clamp(src[p] * (1 - blend * w) + br * blend * w);
+      data[p + 1] = clamp(src[p + 1] * (1 - blend * w) + bg * blend * w);
+      data[p + 2] = clamp(src[p + 2] * (1 - blend * w) + bb * blend * w);
+    }
+    resultCtx.putImageData(img, 0, 0);
+  }
+
+  function doContentAwareFill() {
+    const MAX_PROC = 1600;
+    const procScale = Math.min(1, MAX_PROC / Math.max(imgW, imgH));
+    if (procScale >= 1) {
+      contentAwareFillOn(resultCtx, maskCtx, imgW, imgH);
+    } else {
+      const pw = Math.max(1, Math.round(imgW * procScale)), ph = Math.max(1, Math.round(imgH * procScale));
+      const pc = document.createElement("canvas"); pc.width = pw; pc.height = ph;
+      const pctx = pc.getContext("2d"); pctx.drawImage(resultCanvas, 0, 0, pw, ph);
+      const pm = document.createElement("canvas"); pm.width = pw; pm.height = ph;
+      const pmctx = pm.getContext("2d"); pmctx.drawImage(maskCanvas, 0, 0, pw, ph);
+      contentAwareFillOn(pctx, pmctx, pw, ph);
+      const before = resultCtx.getImageData(0, 0, imgW, imgH);
+      const rd = resultCtx.getImageData(0, 0, imgW, imgH);
+      const md = maskCtx.getImageData(0, 0, imgW, imgH).data;
+      const pd = pctx.getImageData(0, 0, pw, ph).data;
+      const out = rd.data, b4 = before.data;
+      for (let y = 0; y < imgH; y++) {
+        const py = Math.min(ph - 1, (y * procScale) | 0);
+        for (let x = 0; x < imgW; x++) {
+          const i = (y * imgW + x) * 4;
+          const a = md[i + 3] / 255;
+          if (a >= 1) {
+            const px = Math.min(pw - 1, (x * procScale) | 0);
+            const pi = (py * pw + px) * 4;
+            out[i] = pd[pi]; out[i + 1] = pd[pi + 1]; out[i + 2] = pd[pi + 2]; out[i + 3] = 255;
+          } else if (a > 0) {
+            const px = Math.min(pw - 1, (x * procScale) | 0);
+            const pi = (py * pw + px) * 4;
+            out[i]   = b4[i]   * (1 - a) + pd[pi]   * a;
+            out[i+1] = b4[i+1] * (1 - a) + pd[pi+1] * a;
+            out[i+2] = b4[i+2] * (1 - a) + pd[pi+2] * a;
+            out[i+3] = 255;
+          }
+        }
+      }
+      resultCtx.putImageData(rd, 0, 0);
+    }
+    postProcess();
+  }
+
+  /* ---------- 修复画笔：复制纹理 + 明暗匹配 ---------- */
+  document.getElementById("btnClone").onclick = () => {
+    if (!img) return;
+    const cnt = getMaskCount();
+    if (cnt === 0) { toast("请先用「涂抹」标出要消除的区域"); return; }
+    if (!sourcePoint) { toast("请先用「选样本」点一块干净区域"); return; }
+    pushUndo();
+    runBusy(() => { healClone(); clearMask(); render(); });
+  };
+
+  function healClone() {
+    const W = imgW, H = imgH;
+    const imgData = resultCtx.getImageData(0, 0, W, H);
+    const d = imgData.data;
+    const maskData = maskCtx.getImageData(0, 0, W, H).data;
+    let sx = 0, sy = 0, n = 0;
+    for (let i = 3; i < maskData.length; i += 4) if (maskData[i] > 20) {
+      const idx = i / 4; sx += idx % W; sy += (idx / W) | 0; n++;
+    }
+    const cx = sx / n, cy = sy / n;
+    const offX = sourcePoint.x - cx, offY = sourcePoint.y - cy;
+    let lumD = 0, ld = 0;
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      if (maskData[i * 4 + 3] > 20) continue;
+      const p = i * 4; lumD += 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2]; ld++;
+    }
+    lumD = ld ? lumD / ld : 128;
+    let lumS = 0, ls = 0;
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const sx2 = x + Math.round(offX), sy2 = y + Math.round(offY);
+      if (sx2 < 0 || sy2 < 0 || sx2 >= W || sy2 >= H) continue;
+      const si = (sy2 * W + sx2) * 4; lumS += 0.299 * d[si] + 0.587 * d[si + 1] + 0.114 * d[si + 2]; ls++;
+    }
+    lumS = ls ? lumS / ls : 128;
+    const delta = lumD - lumS;
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      if (maskData[i * 4 + 3] <= 20) continue;
+      const sx2 = Math.round(x + offX), sy2 = Math.round(y + offY);
+      if (sx2 < 0 || sy2 < 0 || sx2 >= W || sy2 >= H) continue;
+      const si = (sy2 * W + sx2) * 4, p = i * 4;
+      d[p] = d[si] + delta; d[p + 1] = d[si + 1] + delta; d[p + 2] = d[si + 2] + delta; d[p + 3] = 255;
+    }
+    featherEdges(d, maskData, W, H);
+    resultCtx.putImageData(imgData, 0, 0);
+  }
+
+  function featherEdges(d, maskData, W, H) {
+    const out = new Uint8ClampedArray(d);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      if (maskData[i * 4 + 3] <= 20) continue;
+      const up = maskData[(i - W) * 4 + 3] <= 20, dn = maskData[(i + W) * 4 + 3] <= 20;
+      const lf = maskData[(i - 1) * 4 + 3] <= 20, rt = maskData[(i + 1) * 4 + 3] <= 20;
+      if (!(up || dn || lf || rt)) continue;
+      let r = 0, g = 0, b = 0, a = 0, c = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const ni = (y + dy) * W + (x + dx), pp = ni * 4;
+        r += d[pp]; g += d[pp + 1]; b += d[pp + 2]; a += d[pp + 3]; c++;
+      }
+      const p = i * 4; out[p] = r / c; out[p + 1] = g / c; out[p + 2] = b / c; out[p + 3] = a / c;
+    }
+    d.set(out);
+  }
+
+  document.getElementById("btnSave").onclick = () => {
+    if (!img) return;
+    const fileName = "修复图_" + Date.now() + ".png";
+    resultCanvas.toBlob((blob) => {
+      if (!blob) { toast("保存失败，请长按图片手动保存"); return; }
+      const file = new File([blob], fileName, { type: "image/png" });
+      // 优先用系统分享：iOS/安卓可直接「存储到照片/相册」，这才是真正进相册的方式
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file], title: "修复后的图片" })
+          .then(() => toast("已打开系统分享，请选择「存储到照片」"))
+          .catch(() => { /* 用户取消 → 回退预览长按保存 */ showSaveOverlay(blob, fileName); });
+      } else {
+        showSaveOverlay(blob, fileName);
+      }
+    }, "image/png");
+  };
+  // 回退方案：浏览器不支持系统分享时，用预览图让用户在相册里长按「存储」
+  function showSaveOverlay(blob, fileName) {
+    const url = URL.createObjectURL(blob);
+    saveImg.src = url;
+    saveOverlay.classList.add("show");
+    const a = document.createElement("a");
+    a.href = url; a.download = fileName;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2500);
+    toast("未能直接入相册：请长按上方图片「存储」");
+  }
+  document.getElementById("closeSave").onclick = () => saveOverlay.classList.remove("show");
+
+  // 还原原图：清空所有涂抹与撤销/重做历史，整张图回到上传时的最初状态
+  document.getElementById("btnReset").onclick = () => {
+    if (!img) return;
+    if (!confirm("确定还原为原图吗？所有擦除与修改都会清空，无法恢复。")) return;
+    resultCtx.drawImage(originalCanvas, 0, 0);
+    clearMask();
+    undoStack.length = 0; redoStack.length = 0; sourcePoint = null;
+    render();
+    toast("已还原为原图，可重新涂抹");
+  };
+
+  function setTool(t, btn) {
+    tool = t;
+    document.querySelectorAll(".tool").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    if (t === "paint" || t === "erase") brushPanel.classList.add("show");
+    else brushPanel.classList.remove("show");
+  }
+  document.getElementById("btnPaint").onclick = (e) => setTool("paint", e.currentTarget);
+  document.getElementById("btnErase").onclick = (e) => setTool("erase", e.currentTarget);
+  document.getElementById("btnSource").onclick = (e) => setTool("source", e.currentTarget);
+  document.getElementById("btnMove").onclick = (e) => setTool("move", e.currentTarget);
+  document.getElementById("btnBrush").onclick = () => brushPanel.classList.toggle("show");
+  const btnCompare = document.getElementById("btnCompare");
+  const stopCompare = () => { if (compareMode) { compareMode = false; render(); } };
+  btnCompare.addEventListener("pointerdown", (e) => { e.preventDefault(); compareMode = true; render(); });
+  btnCompare.addEventListener("pointerup", stopCompare);
+  btnCompare.addEventListener("pointerleave", stopCompare);
+  btnCompare.addEventListener("pointercancel", stopCompare);
+  document.getElementById("btnAuto").onclick = (e) => {
+    autoFill = !autoFill;
+    e.currentTarget.classList.toggle("active", autoFill);
+    toast(autoFill ? "已开启：松开手自动修复" : "已关闭：松开手不自动修复");
+  };
+  document.getElementById("btnStruct").onclick = (e) => {
+    structProtect = !structProtect;
+    e.currentTarget.classList.toggle("active", structProtect);
+    toast(structProtect ? "已开启：保护直线/边缘" : "已关闭：不保护结构");
+  };
+
+  brushRange.oninput = () => { brushSize = +brushRange.value; brushVal.textContent = brushSize; };
+  featherRange.oninput = () => { feather = +featherRange.value; featherVal.textContent = feather; };
+
+  function runBusy(fn) {
+    busy.classList.add("show");
+    setTimeout(() => { try { fn(); } finally { busy.classList.remove("show"); } }, 30);
+  }
+  let toastTimer = null;
+  function toast(msg) {
+    let el = document.getElementById("toast");
+    if (!el) {
+      el = document.createElement("div"); el.id = "toast";
+      el.style.cssText = "position:absolute;left:50%;top:60%;transform:translate(-50%,-50%);" +
+        "background:rgba(0,0,0,.85);color:#fff;padding:10px 16px;border-radius:10px;" +
+        "font-size:13px;z-index:40;max-width:80%;text-align:center;";
+      stage.appendChild(el);
+    }
+    el.textContent = msg; el.style.display = "block";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.style.display = "none"; }, 1800);
+  }
+  cv.addEventListener("dblclick", () => { if (img) { fitView(); render(); } });
+
+  // 注册 PWA service worker
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js").catch(e => console.log("SW register failed:", e));
+  }
+})();
+</script>
+</body>
+</html>
